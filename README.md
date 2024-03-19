@@ -14,7 +14,7 @@ pip install -r requirements.txt
 The main functionality is provided through the `detect` function in the `aneurysm_detection` module. You can use the provided script `run.py` to detect aortic aneurysms from a single NRRD image or process multiple images within a directory.
 
 ```bash
-python run.py -p path/to/image.seg.nrrd
+poetry run detect -p path/to/image.seg.nrrd
 ```
 
 ### Optional Arguments:
@@ -33,7 +33,7 @@ python run.py -p path/to/image.seg.nrrd
 
 ## Example
 ```bash
-python run.py -p data/image.seg.nrrd -cla -d
+poetry run detect -p data/image.seg.nrrd -cla -d
 ```
 
 ## Author
