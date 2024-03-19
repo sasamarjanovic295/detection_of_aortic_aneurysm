@@ -15,7 +15,7 @@ from skimage.measure import label, regionprops
 def detect(
         path, 
         closing_structure_shape = (5,5,1),
-        consists_legs_artery=True, 
+        consists_legs_artery=False, 
         outlier_factor = 1.3,
         neighborhood_size = 5,
         outlier_difference_factor = 0.15,
