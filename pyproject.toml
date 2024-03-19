@@ -1,0 +1,21 @@
+[tool.poetry]
+name = "aneurysm_detection"
+version = "0.1.0"
+description = "Detects aortic aneurysms based on the cross sections diameters.."
+authors = ["Sasa Marjanovic <sasa.marjanovic295@gmail.com>"]
+
+[tool.poetry.dependencies]
+python = "^3.9"
+dijkstra3d = "1.14.0"
+matplotlib = "3.8.3"
+numpy = "1.26.4"
+pynrrd = "1.0.0"
+scikit-image = "0.22.0"
+scipy = "1.12.0"
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.poetry.scripts]
+detect = "aneurysm_detection.detect:run"
