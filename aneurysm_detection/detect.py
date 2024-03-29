@@ -1,12 +1,12 @@
 import nrrd
 import numpy as np
 import warnings
-import matplotlib.pyplot as plt
 import dijkstra3d
 import os
+import argparse
 from aneurysm_detection.plot import Plot
 from aneurysm_detection.utils import Utils
-from scipy.ndimage import zoom, rotate, binary_closing
+from scipy.ndimage import zoom, rotate, binary_closing, binary_opening
 from skimage.morphology import skeletonize_3d
 from skimage.measure import label, regionprops
 
@@ -15,7 +15,6 @@ from skimage.measure import label, regionprops
 def detect(
         path, 
         closing_structure_shape = (5,5,1),
-        consists_legs_artery=False, 
         outlier_factor = 1.3,
         neighborhood_size = 5,
         outlier_difference_factor = 0.15,
@@ -23,8 +22,6 @@ def detect(
         bound_angles=(135,0),
         abdominal_and_descending_aorta_threshold=55, 
         aortic_arch_and_asceding_aorta_threshold=60,
-        aneurysm_width_tolerance = 6,
-        bound_step = 2,
         debug_mode = False
 ):
 
@@ -41,15 +38,17 @@ def detect(
         debug_mode=debug_mode
     )
 
-    image = get_scaled_image(image)
-    image = binary_closing(image, structure=np.ones(closing_structure_shape)).astype(np.int16)
+    scaled_image = get_scaled_image(image)
+    Plot.plot_voxel_image(scaled_image, folder_path=folder_path, title='scaled_image', debug_mode=debug_mode)
+    image = binary_closing(scaled_image, structure=np.ones(closing_structure_shape)).astype(np.int16)
+    image = binary_opening(image, structure=np.ones(closing_structure_shape)).astype(np.int16)
     
-    Plot.plot_voxel_image(image, folder_path=folder_path, title='scaled_image', debug_mode=debug_mode)
+    Plot.plot_voxel_image(image, folder_path=folder_path, title='segmented_image', debug_mode=debug_mode)
 
     file_path = Utils.get_cross_sections_file_path(path)
 
     if not os.path.exists(file_path):
-        centerline_mask, centerline = get_aortic_centerline(image, consists_legs_artery)
+        centerline_mask, centerline = get_aortic_centerline(image)
         image[centerline_mask > 0] = np.arange(3, 3 + len(centerline))
 
         Plot.plot_voxel_image(
@@ -87,19 +86,26 @@ def detect(
     else:
         cross_sections = Utils.read_cross_sections(file_path)
 
-    if debug_mode:
-        Plot.plot_cross_sections(cross_sections, folder_path, debug_mode=debug_mode)   
-        Plot.plot_each_slice_plane(cross_sections, image, debug_mode=debug_mode)
+    diameters = [diameter for _, diameter, _ in cross_sections]
+    inds = np.arange(0,len(diameters))
+    coefficients = np.polyfit(inds, diameters, 13)
+    fit_values = np.polyval(coefficients, inds)
+
+    Plot.plot_cross_sections(cross_sections, fit_values, folder_path, debug_mode=debug_mode)   
+
+    Plot.plot_each_slice_plane(cross_sections, image, debug_mode=debug_mode)
+    
 
     bound_cross_sections, bound, bound_cross_sections_inds = detect_aneurysm(
                                     cross_sections, 
+                                    diameters,
+                                    coefficients,
                                     bound_angles,
                                     abdominal_and_descending_aorta_threshold, 
-                                    aortic_arch_and_asceding_aorta_threshold, 
-                                    aneurysm_width_tolerance,
-                                    bound_step
+                                    aortic_arch_and_asceding_aorta_threshold,
+                                    debug_mode
                                 )
-
+    
     Plot.plot_finding_bound_cross_sections(
         cross_sections, 
         bound_cross_sections,
@@ -111,7 +117,16 @@ def detect(
         debug_mode=debug_mode
     )
 
-    Plot.plot_detection(image, bound_cross_sections, folder_path)
+    Plot.plot_detection(
+        image, 
+        scaled_image,
+        cross_sections,  
+        bound_cross_sections, 
+        bound_cross_sections_inds, 
+        space_directions, 
+        original_shape, 
+        folder_path
+    )
 
 
 def get_scaled_image(image):
@@ -136,7 +151,7 @@ def get_rotated_images(image, angles):
     return images
 
 
-def get_aortic_centerline(image, consists_legs_artery):
+def get_aortic_centerline(image):
 
     def get_centerline(centerline_mask):
         centerline_mask = centerline_mask.astype(bool)
@@ -147,9 +162,7 @@ def get_aortic_centerline(image, consists_legs_artery):
     def get_main_centerline(centerline_mask):
     
         def get_centerline_source(centerline_mask):
-            start = 0.2 if consists_legs_artery else 0
-            z_min_treshold = round(centerline_mask.shape[2]*start)
-            for z in range(z_min_treshold, centerline_mask.shape[2], 5):
+            for z in range(0, centerline_mask.shape[2], 2):
                 mask_slice = centerline_mask[:,:,z]
                 labeled_slice = label(mask_slice)
                 regions = regionprops(labeled_slice)
@@ -304,18 +317,20 @@ def find_min_cross_sections(centerline, image, images, debug_mode):
         center_value = image[center[0],center[1], center[2]]
         cross_section = find_min_cross_section(center_value, images)
         if cross_section is not None:
-            cross_sections.append([center, cross_section[0], cross_section[1]])    
+            diameter, angle = cross_section
+            cross_sections.append([center, diameter, angle])    
 
     return cross_sections 
 
 
 def detect_aneurysm(
         cross_sections, 
+        diameters,
+        coefficients,
         bound_angles,
         abdominal_and_descending_aorta_threshold, 
-        aortic_arch_and_asceding_aorta_threshold, 
-        aneurysm_width_tolerance,
-        bound_step = 2,
+        aortic_arch_and_asceding_aorta_threshold,
+        debug_mode
 ):
 
     def get_index_bound():
@@ -325,27 +340,29 @@ def detect_aneurysm(
             if angles[0] == bound_angles[0] and i >= index_threshold:
                 return i
             
-    def find_start_cross_section_index(current_index):
-        bound_index = max(0, current_index - aneurysm_width_tolerance - 1)
-        previous_diameter = cross_sections[current_index][1]
-        for index in range(current_index, bound_index, -bound_step):
-            _, diameter, _ = cross_sections[index]
-            if diameter > previous_diameter:
-                return index + 1
-            previous_diameter = diameter
-        return bound_index + 1
+    def get_derivation_values(diameters, coefficients):
+        inds = np.arange(0,len(diameters))
+        coefficients = np.polyfit(inds, diameters, 10)
+        ders = np.polyder(coefficients,2)
+        return np.polyval(ders, inds)
     
-    def find_end_cross_section_index(current_index):
-        bound_index = min(len(cross_sections), current_index + aneurysm_width_tolerance + 1)
-        previous_diameter = cross_sections[current_index][1]
-        for index in range(current_index, bound_index, bound_step):
-            _, diameter, _ = cross_sections[index]
-            if diameter > previous_diameter:
-                return index - 1
-            previous_diameter = diameter
-        return bound_index - 1
+    def find_start_cross_section_index(derivation_values, current_index):
+        if current_index > 0:
+            for index in range(current_index -1 , -1, -1):
+                if derivation_values[index] <= 0:
+                    return index
+        return 0
+    
+    def find_end_cross_section_index(derivation_values, current_index):
+        values_len = len(derivation_values)
+        if current_index < values_len - 1:
+            for index in range(current_index + 1, values_len):
+                if derivation_values[index] >= -0:
+                    return index
+        return values_len - 1
     
     index_bound = get_index_bound()
+    values = get_derivation_values(diameters, coefficients)
     bound_cross_sections = []
     bound_cross_sections_inds = []
     start_cross_section_index = None
@@ -357,7 +374,7 @@ def detect_aneurysm(
         center, diameter, angles = cross_section
 
         if diameter > threshold and start_cross_section_index == None:
-                start_cross_section_index = find_start_cross_section_index(index)
+                start_cross_section_index = find_start_cross_section_index(values, index)
                 if end_cross_section_index != None and start_cross_section_index <= end_cross_section_index:
                     bound_cross_sections.pop()
                     bound_cross_sections_inds.pop()
@@ -365,7 +382,7 @@ def detect_aneurysm(
                     bound_cross_sections.append(cross_sections[start_cross_section_index])
                     bound_cross_sections_inds.append(start_cross_section_index)
         elif start_cross_section_index != None:
-                end_cross_section_index = find_end_cross_section_index(index)
+                end_cross_section_index = find_end_cross_section_index(values, index)
                 bound_cross_sections.append(cross_sections[end_cross_section_index])
                 bound_cross_sections_inds.append(end_cross_section_index)
                 start_cross_section_index = None
@@ -373,16 +390,11 @@ def detect_aneurysm(
     return bound_cross_sections, index_bound, bound_cross_sections_inds
 
 
-import argparse
-
-
 def run():
     parser = argparse.ArgumentParser(description="Detects aortic aneurysms based on the cross sections diameters.")
     parser.add_argument("-p","--path", type=str, help="Path to the nrrd image.")
     parser.add_argument("-c", "--closing_structure_shape", type=int, nargs=3, default=(5, 5, 1),
                         help="Shape of the structure for binary image closing.")
-    parser.add_argument("-cla", "--consists_legs_artery", action='store_true', 
-                        help="Indicates whether the image includes arteries located in the legs.")
     parser.add_argument("-of", "--outlier_factor", type=float, default=1.3,
                         help="Factor for detecting outliers based on the neighborhood average.")
     parser.add_argument("-ns", "--neighborhood_size", type=int, default=5,
@@ -397,10 +409,6 @@ def run():
                         help="Threshold for the aortic diameter for the abdominal and descending part of the aorta.")
     parser.add_argument("-aat", "--aortic_arch_and_asceding_aorta_threshold", type=int, default=60,
                         help="Threshold for the aortic diameter for the aortic arch and ascending part of the aorta.")
-    parser.add_argument("-awt", "--aneurysm_width_tolerance", type=int, default=6,
-                        help="Maximum allowed distance of the boundary from the point that is first or last above the aneurysm threshold.")
-    parser.add_argument("-bs", "--bound_step", type=int, default=2,
-                        help="Step used to find aneurysm bound cross section.")
     parser.add_argument("-d", "--debug_mode", action='store_true', 
                         help="Activates debugging mode for plotting each algorithm step.")
 
@@ -409,7 +417,6 @@ def run():
     detect(
         args.path, 
         args.closing_structure_shape,
-        args.consists_legs_artery,
         args.outlier_factor,
         args.neighborhood_size,
         args.outlier_difference_factor,
@@ -417,8 +424,6 @@ def run():
         args.bound_angles,
         args.abdominal_and_descending_aorta_threshold,
         args.aortic_arch_and_asceding_aorta_threshold,
-        args.aneurysm_width_tolerance,
-        args.bound_step,
         args.debug_mode
     )
 

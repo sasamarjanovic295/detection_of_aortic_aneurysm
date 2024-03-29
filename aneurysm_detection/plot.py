@@ -1,9 +1,9 @@
 import numpy as np
+from scipy.ndimage import binary_dilation, binary_erosion
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 from skimage.measure import marching_cubes
 from aneurysm_detection.utils import Utils
-
 
 
 class Plot:
@@ -24,7 +24,7 @@ class Plot:
 
         if mask is not None:
             face_color = [1, 0, 0]
-            Plot.__show_voxel_image(ax, mask, mask_threshold, face_color)
+            Plot.__show_voxel_image(ax, mask, mask_threshold, 1, face_color)
 
         ax.set_xlabel('x')
         ax.set_ylabel('y')
@@ -148,10 +148,11 @@ class Plot:
 
 
     @staticmethod
-    def plot_cross_sections(cross_sections, folder_path=None, debug_mode = False):
+    def plot_cross_sections(cross_sections, fit_values, folder_path=None, debug_mode = False):
         fig = plt.figure()
         ax = fig.add_subplot(111)
         Plot.__show_cross_sections(ax, cross_sections)
+        ax.plot(fit_values, color="red")
         plt.ylabel('diameter')
         plt.xlabel('index')
         plt.title('cross sections diameters')
@@ -162,14 +163,33 @@ class Plot:
 
 
     @staticmethod 
-    def plot_detection(image, bound_cross_sections, folder_path=None):
+    def plot_detection(
+        image, 
+        scaled_image,
+        cross_sections,  
+        bound_cross_sections, 
+        bound_cross_sections_inds, 
+        space_directions, 
+        original_shape, 
+        folder_path=None,
+        bound_value = 2
+    ):
         fig = plt.figure()
         ax = fig.add_subplot(111, projection='3d')
-        Plot.__show_voxel_image(ax, image)
+        Plot.__show_voxel_image(ax, scaled_image)
+
         if len(bound_cross_sections) > 0:
-            plt.title("aneurysm is detected")
-            for center, diameter, angles in bound_cross_sections:
-                Plot.__show_slice_plane(ax, center, angles)
+            plt.title("Aneurysm is detected")    
+            detection_mask = Utils.get_detection_mask(
+                image, cross_sections,  
+                bound_cross_sections, 
+                bound_cross_sections_inds,  
+                bound_value, space_directions, 
+                original_shape
+            )
+            scaled_image[detection_mask] = bound_value
+            Plot.__show_voxel_image(ax, scaled_image, bound_value-1, 0.5,[1,0,0])
+        
         else:
             plt.title("Aneurysm is not detected")
         if folder_path != None:
@@ -180,11 +200,9 @@ class Plot:
 
 
 
-    def __show_voxel_image(ax, image, threshold = 0.5, face_color = None):
+    def __show_voxel_image(ax, image, threshold = 0.5, alpha = 0.2,face_color = [0.5, 0.5, 1]):
         verts, faces, normals, values = marching_cubes(image, threshold)
-        mesh = Poly3DCollection(verts[faces], alpha=0.2)
-        if face_color is None:
-            face_color = [0.5, 0.5, 1]
+        mesh = Poly3DCollection(verts[faces], alpha=alpha)
         mesh.set_facecolor(face_color)
         ax.add_collection3d(mesh)
         ax.set_xlim(0, image.shape[0])
@@ -201,7 +219,7 @@ class Plot:
         y = np.arange(y_min, y_max, 0.1)
         x = np.arange(x_min, x_max, 0.1)
         x, y = np.meshgrid(x, y)
-        z = (D - x*A - y*B) / C 
+        z = (-D - x*A - y*B) / C 
 
         if angles[0] == 90:
             y = center[1]
