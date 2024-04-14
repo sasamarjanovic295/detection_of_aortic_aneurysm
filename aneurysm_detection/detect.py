@@ -1,20 +1,22 @@
-import nrrd
+from itertools import product
 import numpy as np
+import nrrd
 import warnings
 import dijkstra3d
 import os
 import argparse
 from aneurysm_detection.plot import Plot
 from aneurysm_detection.utils import Utils
-from scipy.ndimage import zoom, rotate, binary_closing, binary_opening
+from scipy.ndimage import zoom, rotate, binary_closing, binary_opening, binary_erosion, binary_dilation
 from skimage.morphology import skeletonize_3d
 from skimage.measure import label, regionprops
+import matplotlib.pyplot as plt
 
 
 
 def detect(
         path, 
-        closing_structure_shape = (5,5,1),
+        closing_structure_shape = (4,4,4),
         outlier_factor = 1.3,
         neighborhood_size = 5,
         outlier_difference_factor = 0.15,
@@ -42,9 +44,9 @@ def detect(
     Plot.plot_voxel_image(scaled_image, folder_path=folder_path, title='scaled_image', debug_mode=debug_mode)
     image = binary_closing(scaled_image, structure=np.ones(closing_structure_shape)).astype(np.int16)
     image = binary_opening(image, structure=np.ones(closing_structure_shape)).astype(np.int16)
-    
-    Plot.plot_voxel_image(image, folder_path=folder_path, title='segmented_image', debug_mode=debug_mode)
 
+    Plot.plot_voxel_image(image, folder_path=folder_path, title='segmented_image', debug_mode=debug_mode)
+    
     file_path = Utils.get_cross_sections_file_path(path)
 
     if not os.path.exists(file_path):
@@ -56,10 +58,11 @@ def detect(
             title='centerline',
             debug_mode=debug_mode
         )
-
-        angles = [0, 45, 90, 135]
-        images = get_rotated_images(image, angles)
-        cross_sections = find_min_cross_sections(centerline, image, images, debug_mode)
+        
+        angles = np.arange(0, 180, 45)
+        angles = Utils.get_rotation_angles(angles)
+        print("Rotations:",len(angles), "x3")
+        cross_sections = find_min_cross_sections(centerline, image, angles, debug_mode)
         cross_sections = get_cross_sections_with_physical_length_diameter(
                             cross_sections, 
                             space_directions, 
@@ -86,26 +89,17 @@ def detect(
     else:
         cross_sections = Utils.read_cross_sections(file_path)
 
-    diameters = [diameter for _, diameter, _ in cross_sections]
-    inds = np.arange(0,len(diameters))
-    coefficients = np.polyfit(inds, diameters, 13)
-    fit_values = np.polyval(coefficients, inds)
-
-    Plot.plot_cross_sections(cross_sections, fit_values, folder_path, debug_mode=debug_mode)   
+    Plot.plot_cross_sections(cross_sections, folder_path, debug_mode=debug_mode)   
 
     Plot.plot_each_slice_plane(cross_sections, image, debug_mode=debug_mode)
-    
 
     bound_cross_sections, bound, bound_cross_sections_inds = detect_aneurysm(
                                     cross_sections, 
-                                    diameters,
-                                    coefficients,
-                                    bound_angles,
                                     abdominal_and_descending_aorta_threshold, 
                                     aortic_arch_and_asceding_aorta_threshold,
                                     debug_mode
                                 )
-    
+    print("\n".join([str(bcs) for bcs in bound_cross_sections]))
     Plot.plot_finding_bound_cross_sections(
         cross_sections, 
         bound_cross_sections,
@@ -134,21 +128,6 @@ def get_scaled_image(image):
     image = zoom(image, scaling_factors, order=0).astype(np.int16)
 
     return image
-
-
-def get_rotated_images(image, angles):
-    images = {}
-
-    for angle_x in angles:
-        for angle_y in angles:
-            if (angle_x == 90 and (90,0) in images.keys()) or (angle_y == 90 and (0,90) in images.keys()):
-                continue
-            rotated_image = rotate(image, angle_x, axes=(1,2), order=0)
-            rotated_image = rotate(rotated_image, angle_y, axes=(0,2), order=0)
-            key = (angle_x, angle_y)
-            images[key] = rotated_image
-    
-    return images
 
 
 def get_aortic_centerline(image):
@@ -280,42 +259,39 @@ def filter_by_diameter(cross_sections: list, outlier_factor, neighborhood_size, 
     return cross_sections, removed_cross_sections, cross_sections_inds, removed_cross_sections_inds
 
 
-def find_min_cross_sections(centerline, image, images, debug_mode):
+def find_min_cross_sections(centerline, image, angles, debug_mode, radius = 15):
 
-    def find_min_cross_section(center_value, images):
+    def find_min_cross_section(center, radius, image, angles):
+        subimage = Utils.extract_subimage(image, radius, center)
+        x, y, z = subimage.shape[0] // 2, subimage.shape[1] // 2, subimage.shape[2] // 2
         result = None
         min_diameter = np.finfo(np.float16).max
-        angles = images.keys()
         data = {}
         for angle in angles:
-            img = images[angle]
-            centers = np.where(img == center_value)
-            if(len(centers[0])>0):
-                x,y,z = centers[0][0], centers[1][0], centers[2][0]
-                img_slice = img[:,:,z]
-                ct_slice = (img_slice > 0).astype(int)
-                labeled_slice = label(ct_slice)
-                regions = regionprops(labeled_slice)
-                label_of_center = labeled_slice[x,y]
-                if len(regions) > 0:
-                    min_rotation_diameter = np.finfo(np.float16).max
-                    for region in regions: 
-                        if label_of_center == region.label and region.axis_major_length < min_diameter:
-                            min_diameter = region.axis_major_length
-                            result = (min_diameter, angle)
-                            min_rotation_diameter = region.axis_major_length
-                            break
-                    data[angle] = (img, angle, centers, center_value, ct_slice, regions, min_rotation_diameter, min_diameter)
-            else:
-                return None
-            
-        Plot.plot_finding_min_cross_section(data, debug_mode)
+            angle_x, angle_y, angle_z = angle
+            rotated_image = rotate(subimage, angle_x, axes=(1,2), reshape=False, order=0, prefilter=False)
+            rotated_image = rotate(rotated_image, angle_y, axes=(0,2), reshape=False, order=0, prefilter=False)
+            rotated_image = rotate(rotated_image, angle_z, axes=(0,1), reshape=False, order=0, prefilter=False)
+            img_slice = rotated_image[:,:,z]
+            ct_slice = (img_slice > 0).astype(int)
+            labeled_slice = label(ct_slice)
+            regions = regionprops(labeled_slice)
+            label_of_center = labeled_slice[x,y]
+            if len(regions) > 0:
+                for region in regions: 
+                    if label_of_center == region.label and region.axis_major_length < min_diameter:
+                        min_diameter = region.axis_major_length
+                        result = [min_diameter, angle]
+                        break
+                data[angle] = (rotated_image, angle,(x,y,z), ct_slice, regions, min_diameter)
+
+        if min_diameter > 14:
+            Plot.plot_finding_min_cross_section(subimage, result, data, False)
         return result
 
     cross_sections = []
-    for i, center in enumerate(centerline):
-        center_value = image[center[0],center[1], center[2]]
-        cross_section = find_min_cross_section(center_value, images)
+    for center in centerline:
+        cross_section = find_min_cross_section(center, radius, image, angles)
         if cross_section is not None:
             diameter, angle = cross_section
             cross_sections.append([center, diameter, angle])    
@@ -325,25 +301,25 @@ def find_min_cross_sections(centerline, image, images, debug_mode):
 
 def detect_aneurysm(
         cross_sections, 
-        diameters,
-        coefficients,
-        bound_angles,
         abdominal_and_descending_aorta_threshold, 
         aortic_arch_and_asceding_aorta_threshold,
         debug_mode
 ):
 
-    def get_index_bound():
-        index_threshold = round(len(cross_sections) * 0.6)
-        for i,cross_section in enumerate(cross_sections):
-            center, diameter, angles = cross_section
-            if angles[0] == bound_angles[0] and i >= index_threshold:
+    def get_index_bound(diameters):
+        derivation_values = get_derivation_values(diameters, deg=6, order=1)
+        positive_value_found = False
+        for i in range(len(derivation_values) - 1, -1, -1):
+            value = derivation_values[i]
+            if value > 0: 
+                positive_value_found = True
+            if positive_value_found and value <= 0:
                 return i
             
-    def get_derivation_values(diameters, coefficients):
+    def get_derivation_values(diameters, deg, order):
         inds = np.arange(0,len(diameters))
-        coefficients = np.polyfit(inds, diameters, 10)
-        ders = np.polyder(coefficients,2)
+        coefficients = np.polyfit(inds, diameters, deg)
+        ders = np.polyder(coefficients, order)
         return np.polyval(ders, inds)
     
     def find_start_cross_section_index(derivation_values, current_index):
@@ -361,8 +337,14 @@ def detect_aneurysm(
                     return index
         return values_len - 1
     
-    index_bound = get_index_bound()
-    values = get_derivation_values(diameters, coefficients)
+    diameters = [diameter for _, diameter, _ in cross_sections]
+    index_bound = get_index_bound(diameters)
+    print(index_bound)
+    values = get_derivation_values(diameters, deg=11, order=1)
+    fig = plt.figure()
+    ax = fig.add_subplot(111)
+    ax.plot(values)
+    plt.show()
     bound_cross_sections = []
     bound_cross_sections_inds = []
     start_cross_section_index = None
@@ -393,7 +375,7 @@ def detect_aneurysm(
 def run():
     parser = argparse.ArgumentParser(description="Detects aortic aneurysms based on the cross sections diameters.")
     parser.add_argument("-p","--path", type=str, help="Path to the nrrd image.")
-    parser.add_argument("-c", "--closing_structure_shape", type=int, nargs=3, default=(5, 5, 1),
+    parser.add_argument("-c", "--closing_structure_shape", type=int, nargs=3, default=(4, 4, 4),
                         help="Shape of the structure for binary image closing.")
     parser.add_argument("-of", "--outlier_factor", type=float, default=1.3,
                         help="Factor for detecting outliers based on the neighborhood average.")

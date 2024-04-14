@@ -4,7 +4,8 @@ import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 from skimage.measure import marching_cubes
 from aneurysm_detection.utils import Utils
-
+import cv2 as cv
+import random as rng
 
 class Plot:
 
@@ -49,48 +50,66 @@ class Plot:
 
 
     @staticmethod
-    def plot_slice_plane(center, center_value, angles, radius, image, debug_mode = False):
+    def plot_slice_plane(center, angles, radius, image, debug_mode = False):
         fig = plt.figure(figsize=(7, 7))
         ax = fig.add_subplot(111, projection='3d')
         
         Plot.__show_voxel_image(ax, image)
         ax.scatter(center[0], center[1], center[2], color="red", s=3)
-        Plot.__show_slice_plane(ax, center, angles)
+        Plot.__show_slice_plane(ax, image, center, angles)
 
         ax.set_xlabel('x')
         ax.set_ylabel('y')
-        ax.set_title(f"{center} - {center_value} - {angles} - {radius}")
+        ax.set_title(f"{center} -  {angles} - {radius}")
         plt.show(block=debug_mode)
         plt.close()
 
 
     @staticmethod
-    def plot_finding_min_cross_section(data:dict, debug_mode = False):
+    def plot_finding_min_cross_section(image, result,data:dict, debug_mode = False):
         if debug_mode:
             fig = plt.figure()
-            nrows = 6
-            
             i = 1
             for key in data.keys():
-                image, angles, center, center_value, ct_slice, regions, min_rotation_radius, min_radius = data[key]
-                x,y,z = center[0][0], center[1][0], center[2][0]
-                ax = fig.add_subplot(nrows, 4, i, projection='3d')
-                ax.set_title(str((angles, len(center[0]), (x,y,z),center_value)))
-                Plot.__show_voxel_image(ax, image)
-                ax.scatter(center[0], center[1], center[2], color="red")
-
-                i+=1
-                ax = fig.add_subplot(nrows, 4, i)
+                rotated_image, angles, center, ct_slice, regions, min_diameter = data[key]
+                cord = rotated_image.shape[0]
+                ax = fig.add_subplot(5, 6, i)
                 radiuses = [round(region.axis_major_length,2) for region in regions]
-                title = f"{angles}, {round(np.float64(min_rotation_radius),2)}, {round(np.float64(min_radius), 2)}\n{radiuses}"
+                title = f"{angles} {radiuses}"
                 ax.set_title(title)
-                ax.imshow(ct_slice)
-                ax.scatter(y,x, color="red", s=1)
+                ax.imshow(Plot.draw_contours(ct_slice))
+                cord = ct_slice.shape[0] // 2
+                ax.scatter(cord,cord, color="red", s=1)
                 for region in regions:
                     x, y = round(region.centroid[0]), round(region.centroid[1])
                     ax.scatter(y,x, color="blue", s=1)
                 i+=1
-            plt.tight_layout()
+
+            fig = plt.figure()
+            i = 1
+            for key in data.keys():
+                rotated_image, angles, center, ct_slice, regions, min_diameter = data[key]
+                cord = rotated_image.shape[0] // 2
+                ax = fig.add_subplot(5,6,i, projection='3d')
+                ax.set_title(str((angles, center)))
+                Plot.__show_voxel_image(ax, rotated_image)
+                ax.scatter(cord, cord, cord, color="red")
+                ax.set_xlabel('x')
+                ax.set_ylabel('y')
+                i+=1
+
+            # fig = plt.figure()
+            # ax = fig.add_subplot(111, projection='3d')
+            # ax.set_title(str((center, result[0], result[1])))
+            # Plot.__show_voxel_image(ax, image)
+            # ax.scatter(center[0], center[1], center[2], color="red", s=1)
+            # Plot.__show_slice_plane(ax, image, center, result[1])
+            # ax.set_xlabel('x')
+            # ax.set_ylabel('y')
+            # i+=1
+            # plt.show(block=debug_mode)
+            # plt.close()
+            
             plt.show(block=debug_mode)
             plt.close()
 
@@ -187,6 +206,7 @@ class Plot:
                 bound_value, space_directions, 
                 original_shape
             )
+            image[detection_mask] = bound_value
             scaled_image[detection_mask] = bound_value
             Plot.__show_voxel_image(ax, scaled_image, bound_value-1, 0.5,[1,0,0])
         
@@ -199,7 +219,6 @@ class Plot:
         plt.show()
 
 
-
     def __show_voxel_image(ax, image, threshold = 0.5, alpha = 0.2,face_color = [0.5, 0.5, 1]):
         verts, faces, normals, values = marching_cubes(image, threshold)
         mesh = Poly3DCollection(verts[faces], alpha=alpha)
@@ -210,28 +229,39 @@ class Plot:
         ax.set_zlim(0, image.shape[2])
 
 
-    def __show_slice_plane(ax, center, angles):
-        normal_vector = Utils.get_normal_vector(angles)
+    def __show_slice_plane(ax, image, center, angles, alpha = 0.5, face_color = [1,0,0]):
+        image = (image > 0).astype(int)
+        normal_vector = Utils.get_rotated_normal_vector(angles)
         A,B,C,D = Utils.get_equation_of_plane(center, normal_vector)
         plane_radius = 15
-        x_min, x_max, y_min, y_max, z_min, z_max = Utils.get_plane_bbox(plane_radius, center)
-
-        y = np.arange(y_min, y_max, 0.1)
-        x = np.arange(x_min, x_max, 0.1)
-        x, y = np.meshgrid(x, y)
-        z = (-D - x*A - y*B) / C 
-
-        if angles[0] == 90:
-            y = center[1]
-            z = np.clip(z, z_min, z_max)
-        elif angles[1] == 90:
-            x = center[0]
-            z = np.clip(z, z_min, z_max)
-
-        ax.plot_wireframe(x, y, z, color="red", alpha=0.2)
+        x_min, x_max, y_min, y_max, z_min, z_max = Utils.get_plane_bbox(plane_radius, center, image.shape)
+        points = Utils.get_bound_points(center, x_min, x_max, y_min, y_max, z_min, z_max, A, B, C, D)
+        for point in points:
+                image[point[0], point[1], point[2]] = 2
+        Plot.__show_voxel_image(ax, image, 1, alpha, face_color)
+        
 
     def __show_cross_sections(ax, cross_sections, inds=None, color="blue"):
         if inds == None:
             inds = np.arange(len(cross_sections))
         y = [radius for center, radius, angles in cross_sections]
         ax.scatter(inds,y, s=3)
+
+    @staticmethod
+    def draw_contours(binary_image):
+        # Find contours in the binary image
+        binary_image = np.array(binary_image, np.uint8)
+        contours, _ = cv.findContours(binary_image, cv.RETR_TREE, cv.CHAIN_APPROX_SIMPLE)
+
+        drawing = binary_image
+
+        for i, c in enumerate(contours):
+            color = (np.random.randint(0, 256), np.random.randint(0, 256), np.random.randint(0, 256))
+            
+            if len(c) > 5:
+                ellipse = cv.fitEllipse(c)
+                print("elipse", ellipse)
+                #minimum width i hight
+                cv.ellipse(drawing, ellipse, 2, thickness=1)
+
+        return drawing

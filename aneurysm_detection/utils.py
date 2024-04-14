@@ -4,52 +4,95 @@ import numpy as np
 import csv
 import ast
 import json
+from scipy.ndimage import zoom, rotate
+import cv2 as cv
 
 class Utils:
-
     __inv_rot_matrices = {}
+    __rotation_angles = []
+    __rotated_normal_vectors = {}
+
+    @staticmethod
+    def get_rotation_angles(angles):
+        images = []
+        image = np.zeros((31,31,31))
+        image[:,:,15] = 1
+        for angle_x in angles:
+            for angle_y in angles:
+                for angle_z in angles:
+                    angle = (angle_x, angle_y, angle_z)
+                    rotated_image = Utils.rotate_image(image, angle)
+                    are_parallel = any(np.array_equal(rotated_image[10:21,10:21, 10:21], img[10:21,10:21, 10:21]) for img in images)
+                    if len(images) == 0 or not are_parallel:
+                        images.append(rotated_image)
+                        Utils.__rotation_angles.append(angle)
+        return Utils.__rotation_angles
+
+
+    @staticmethod
+    def get_rotated_normal_vector(angle, normal_vector=[0, 0, 1]):
+        if angle not in Utils.__rotated_normal_vectors.keys():
+            inv_rotation_matrix = Utils.__get_inv_rot_matrix(angle)
+            rotated_normal_vector = np.dot(inv_rotation_matrix, normal_vector)
+            print(rotated_normal_vector, angle)
+            Utils.__rotated_normal_vectors[angle] = rotated_normal_vector
+        return Utils.__rotated_normal_vectors[angle]
+
+
+    @staticmethod
+    def __get_inv_rot_matrix(angle):
+        if angle not in Utils.__inv_rot_matrices:
+            angle_x, angle_y, angle_z = angle
+            angle_x_rad = np.radians(angle_x)
+            angle_y_rad = np.radians(angle_y)
+            angle_z_rad = np.radians(angle_z)
+            rotation_matrix_x = np.array([
+                [1, 0, 0],
+                [0, np.cos(angle_x_rad), -np.sin(angle_x_rad)],
+                [0, np.sin(angle_x_rad), np.cos(angle_x_rad)]
+            ])
+            rotation_matrix_y = np.array([
+                [np.cos(angle_y_rad), 0, np.sin(angle_y_rad)],
+                [0, 1, 0],
+                [-np.sin(angle_y_rad), 0, np.cos(angle_y_rad)]
+            ])
+            rotation_matrix_z = np.array([
+                [np.cos(angle_z_rad), -np.sin(angle_z_rad), 0],
+                [np.sin(angle_z_rad), np.cos(angle_z_rad), 0],
+                [0, 0, 1]
+            ])
+            rotation_matrix = np.dot(rotation_matrix_z, np.dot(rotation_matrix_y, rotation_matrix_x))
+            inv_rotation_matrix = np.linalg.inv(rotation_matrix)
+            Utils.__inv_rot_matrices[angle] = inv_rotation_matrix
+
+        return Utils.__inv_rot_matrices[angle]
     
     @staticmethod
-    def get_normal_vector(angles):
-        if(angles[0]):
-            return [0,1,0]
-        if(angles[1]):
-            return [1,0,0]
-        inv_rotation_matrix = Utils.__get_inv_rot_matrix(angles)
-        normal_vector = np.array([0,0,1])
-        return np.dot(inv_rotation_matrix, normal_vector)
+    def __are_parallel(u, v):
+        u = np.array(u)
+        v = np.array(v)
 
+        dot_product = np.dot(u, v)
 
-    def __get_inv_rot_matrix(angles):
-        if angles not in Utils.__inv_rot_matrices.keys():
-            angle_x, angle_y = angles
-            angle_x_rad=np.radians(angle_x)
-            angle_y_rad = np.radians(angle_y)
+        norm_u_squared = np.dot(u, u)
+        norm_v_squared = np.dot(v, v)
 
-            rotation_matrix_x = np.array([
-                [1, 0, 0], 
-                [0, np.cos(angle_x_rad), -np.sin(angle_x_rad)], 
-                [0, np.sin(angle_x_rad), np.cos(angle_x_rad)]])
-            rotation_matrix_y = np.array([
-                [np.cos(angle_y_rad), 0, np.sin(angle_y_rad)], 
-                [0, 1, 0], 
-                [-np.sin(angle_y_rad), 0, np.cos(angle_y_rad)]])
-            
-            rotation_matrix = np.dot(rotation_matrix_x, rotation_matrix_y)
-            inv_rotation_matrix = np.linalg.inv(rotation_matrix)
-            Utils.__inv_rot_matrices[angles] = inv_rotation_matrix
+        if np.isclose(norm_u_squared, 0) or np.isclose(norm_v_squared, 0):
+            return True  
+        else:
+            cosine_similarity = abs(dot_product / np.sqrt(norm_u_squared * norm_v_squared))
+            return np.isclose(cosine_similarity, 1)
 
-        return Utils.__inv_rot_matrices[angles]
 
 
     @staticmethod
-    def get_plane_bbox(range, inds):
-        x_min = round(inds[0] - range - 1)
-        x_max = round(inds[0] + range + 1)
-        y_min = round(inds[1] - range - 1)
-        y_max = round(inds[1] + range + 1)
-        z_min = round(inds[2] - range - 1)
-        z_max = round(inds[2] + range + 1)
+    def get_plane_bbox(range, inds, shape):
+        x_min = max(round(inds[0] - range), 0)
+        x_max = min(round(inds[0] + range), shape[0])
+        y_min = max(round(inds[1] - range), 0)
+        y_max = min(round(inds[1] + range), shape[1])
+        z_min = max(round(inds[2] - range), 0)
+        z_max = min(round(inds[2] + range), shape[2])
 
         return x_min, x_max, y_min, y_max, z_min, z_max
 
@@ -59,7 +102,6 @@ class Utils:
         A, B, C = normal_vector
         x0, y0, z0 = point
         D = -A*x0 + -B*y0 + -C*z0
-
         return np.array([A,B,C,D])
     
 
@@ -122,21 +164,10 @@ class Utils:
 
         def add_bound_cross_sectiion(image, bound_cross_section, bound_value):
             center, diameter, angles = bound_cross_section
-            normal_vector = Utils.get_normal_vector(angles)
+            normal_vector = Utils.get_rotated_normal_vector(angles)
             A, B, C, D = Utils.get_equation_of_plane(center, normal_vector)
-            x_min, x_max, y_min, y_max, z_min, z_max = Utils.get_plane_bbox(diameter, center)
-            x = center[0] if angles[0] == 90 else np.arange(x_min, x_max)
-            y = center[1] if angles[1] == 90 else np.arange(y_min, y_max)
-            if 90 in angles:
-                z = np.arange(z_min, z_max)
-                x,y,z = np.meshgrid(x,y,z)
-            elif np.isclose(C,0):
-                z = center[2]
-                x,y,z = np.meshgrid(x,y,z)
-            else:
-                x,y = np.meshgrid(x,y)
-                z = (-D - A*x - B*y) / C
-            points = np.column_stack((x.flatten(), y.flatten(), z.flatten())).astype(int)
+            x_min, x_max, y_min, y_max, z_min, z_max = Utils.get_plane_bbox(diameter, center, image.shape)
+            points = Utils.get_bound_points(center, x_min, x_max, y_min, y_max, z_min, z_max, A, B, C, D)
             for point in points:
                 if image[point[0], point[1], point[2]] != 0:
                     image[point[0], point[1], point[2]] = bound_value
@@ -166,14 +197,27 @@ class Utils:
                                     image.shape
                                 )
         for i in range(0, len(bound_cross_sections), 2):
-            print(bound_cross_sections[i])
             image = add_bound_cross_sectiion(image, bound_cross_sections[i], bound_value)
-            image = add_bound_cross_sectiion(image, bound_cross_sections[i+1], bound_value)
-            next_cross_section_ind = bound_cross_sections_inds[i] + 1
-            start_point, diameter, angles = cross_sections[next_cross_section_ind]
+            if i+1 < len(bound_cross_sections):
+                image = add_bound_cross_sectiion(image, bound_cross_sections[i+1], bound_value)
+            next_cross_section_ind = bound_cross_sections_inds[i] + 2
+            start_point, _, _ = cross_sections[next_cross_section_ind]
             image = flood_fill(image, bound_value, start_point, [0, bound_value])
             
         return image == bound_value
+    
+    @staticmethod
+    def get_bound_points(center, x_min, x_max, y_min, y_max, z_min, z_max, A, B, C, D):
+        x = np.arange(x_min, x_max, 0.1)
+        y = np.arange(y_min, y_max, 0.1)
+        if np.isclose(C,0):
+            z = center[2] 
+            x,y,z = np.meshgrid(x,y,z)
+        else:
+            x,y = np.meshgrid(x,y)
+            z = (-D - A*x - B*y) / C
+        points_out = np.column_stack((x.flatten(), y.flatten(), z.flatten())).astype(int)
+        return list(filter(lambda p: z_min <= p[2] < z_max, points_out))
     
     @staticmethod
     def get_cross_sections_with_voxel_diameter(
@@ -189,7 +233,7 @@ class Utils:
         y_length = np.sqrt(y_direction[0]**2 + y_direction[1]**2 + y_direction[2]**2) * y_scale
         for i in range(0, len(cross_sections)):
             cross_section = list(cross_sections[i])
-            cross_section[1] = cross_section[1] / np.sqrt(x_length**2 + y_length**2) + 10 #+ z_length**2)
+            cross_section[1] = cross_section[1] / np.sqrt(x_length**2 + y_length**2) #+ z_length**2)
             cross_sections[i] = cross_section
         return cross_sections
     
@@ -199,3 +243,28 @@ class Utils:
         for idx in inds:
             arr = np.delete(arr, idx)
         return arr
+    
+    @staticmethod
+    def extract_subimage(image, radius, center):
+        x_dim, y_dim, z_dim = image.shape
+        x_max_radius = min(center[0], x_dim - center[0])
+        y_max_radius = min(center[1], y_dim - center[1])
+        z_max_radius = min(center[2], z_dim - center[2])
+        x_radius = min(radius, x_max_radius)
+        y_radius = min(radius, y_max_radius)
+        z_radius = min(radius, z_max_radius)
+        x_start = center[0] - x_radius
+        y_start = center[1] - y_radius
+        z_start = center[2] - z_radius
+        x_end = center[0] + x_radius + 1
+        y_end = center[1] + y_radius + 1
+        z_end = center[2] + z_radius + 1
+        return image[x_start:x_end, y_start:y_end, z_start:z_end]
+    
+    @staticmethod
+    def rotate_image(image, angles):
+        angle_x, angle_y, angle_z = angles
+        rotated_image = rotate(image, angle_x, axes=(1,2), reshape=False, order=0, prefilter=False)
+        rotated_image = rotate(rotated_image, angle_y, axes=(0,2), reshape=False, order=0, prefilter=False)
+        rotated_image = rotate(rotated_image, angle_z, axes=(0,1), reshape=False, order=0, prefilter=False)
+        return rotated_image
